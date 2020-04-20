@@ -1,5 +1,6 @@
 import argparse
 import email
+import logging
 import os
 import re
 import shutil
@@ -11,7 +12,11 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from loggers import error_log
+from loggers import invalid_email_log
+from loggers import sent_email_log
 from pathlib import Path
+
 
 def validate_email(email_address):
     """Valides an email address"""
@@ -26,9 +31,9 @@ def validate_email_list(email_list):
         valid = validate_email(email_address)
         if not valid:
             email_list.remove(email_address)
-            error = f"The email for {email_addresss} does not appear to be valid."
-            # TODO: Log the email_address that was flagg as not valid
-            print(error)
+            error = f"The email for {email_address} does not appear to be valid."
+            invalid_email_log.info(error)
+            continue
     return email_list
 
 def get_email_list(pdf_directory):
@@ -60,13 +65,13 @@ def get_emails_and_pdfs(email_list, pdf_directory):
                 document.unlink()
             except OSError as error:
                 error = f"There was an error deleting {document} it was: {error}"
-                #TODO: log this error
-                print(error)
+                error_log.error(error)
+                sys.exit()
     for email in email_list:
         username = email.split("@")[0]
         current_filename = email+".pdf"
         current_file_location = str(pdf_directory_path / current_filename)
-        new_filename = "Something_" + username + ".pdf"
+        new_filename = "AreYouReturning_" + username + ".pdf"
         new_file_location = valid_pdf_directory / new_filename
         try:
             shutil.copy2(current_file_location, new_file_location)
@@ -75,66 +80,148 @@ def get_emails_and_pdfs(email_list, pdf_directory):
                 There was a SameFileError trying to copy2 with {current_file_location} and 
                 {new_file_location}. See error: {e}
             """
-            print(error)
-            #TODO: log this error
+            error_log.warning(error)
+            pass
         except OSError as e:
             error = f"""
                 There was an OSError most likely caused by an unwritable destination!
+                Current file location: {current_file_location}
+                New file location: {new_file_location}
                 See error: {e}
             """
-            print(error)
-            #TODO: log this error
+            error_log.error(error)
+            sys.exit()
         email_data = (email, new_filename, new_file_location)
         valid_pdf_data.append(email_data)
     return valid_pdf_data
 
-
-def send_emails(pdf_data):
-    for email, pdf_name, pdf_location in pdf_data:
-        subject = "Test Subject"
-        body = "Some Dummy Body Text"
-        sender_email = os.environ.get('SENDER_EMAIL')
-        reciever_email = email
-        password = os.environ.get('SMTP_PASSWORD')
-        smtp_address = os.environ.get('SMTP_ADDRESS')
-        smtp_port = os.environ.get('SMTP_PORT')
-
-
-        message = MIMEMultipart()
-        message["From"] = sender_email
-        message["To"] = reciever_email
-        message["Subject"] = subject
-
-        message.attach(MIMEText(body, "plain"))
-
-        with open(pdf_location, "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-
-        encoders.encode_base64(part)
-
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename= {pdf_name}",
-        )
-
-        message.attach(part)
-        text = message.as_string()
-
-        # Login and send
-        context = ssl.create_default_context()
-        with smtplib.SMTP(smtp_address, smtp_port) as server:
-            server.starttls(context=context)
+def send_emails(pdf_data, test_run=False):
+    # Connect to server
+    context = ssl.create_default_context()
+    sender_email = os.environ.get('SENDER_EMAIL')
+    password = os.environ.get('SMTP_PASSWORD')
+    smtp_address = os.environ.get('SMTP_ADDRESS')
+    smtp_port = os.environ.get('SMTP_PORT')
+    with smtplib.SMTP_SSL(smtp_address, smtp_port) as server:
+        try:
             server.login(sender_email, password)
-            server.sendmail(sender_email, reciever_email, text)
-        #TODO: log that we succesfully send the email or catch an error
+        except SMTPHeloError as error:
+            error_message = (f"""
+                There was a HELO error when logging in to SMTP. 
+                Error: {error}
+            """)
+            error_log.error(error_message)
+            print(error_message)
+            sys.exit()
+        except SMTPAuthenticationError as error:
+            error_message = (f"""
+                There was an AuthenticationError when logging in to SMTP. 
+                Error: {error}
+            """)
+            error_log.error(error_message)
+            print(error_message)
+            sys.exit()
+        except SMTPNotSupportedError as error:
+            error_message = (f"""
+                There was an SMTPNotSupportedError when logging in to SMTP. 
+                Error: {error}
+            """)
+            error_log.error(error_message)
+            print(error_message)
+            sys.exit()
+        except SMTPException as error:
+            error_message = (f"""
+                There was an SMTPException when logging in to SMTP. 
+                Error: {error}
+            """)
+            error_log.error(error_message)
+            print(error_message)
+            sys.exit()
+        # Setup Email
+        for email, pdf_name, pdf_location in pdf_data:
+            subject = "Test Subject"
+            body = "Some Dummy Body Text"
+            reciever_email = email
+
+            message = MIMEMultipart()
+            message["From"] = sender_email
+            message["To"] = reciever_email
+            message["Subject"] = subject
+
+            message.attach(MIMEText(body, "plain"))
+
+            with open(pdf_location, "rb") as attachment:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+
+            encoders.encode_base64(part)
+
+            part.add_header(
+                "Content-Disposition",
+                f"attachment; filename= {pdf_name}",
+            )
+
+            message.attach(part)
+            text = message.as_string()
+
+            if test_run:
+                sent_email_log.info(f"Test Run - would have sent: {email}, {pdf_name}, {pdf_location}")
+            else:
+                try:
+                    server.sendmail(sender_email, reciever_email, text)
+                except SMTPRecipientsRefused as error:
+                    error_log.error(f"""
+                        The recipients refused the email. 
+                        Reciever: {reciever_email}
+                        Error: {error}
+                    """)
+                    continue
+                except SMTPHeloError as error:
+                    error_log.error(f"""
+                        There was a HELO error!
+                        Reciever: {reciever_email}
+                        Error: {error}
+                    """)
+                    continue
+                except SMTPSenderRefused as error:
+                    error_log.error(f"""
+                        There was a SenderRefused error!
+                        Sender: {sender_email}
+                        Reciever: {reciever_email}
+                        Error: {error}
+                    """)
+                    continue
+                except SMTPDataError as error:
+                    error_log.error(f"""
+                        There was a Data error!
+                        Reciever: {reciever_email}
+                        Error: {error}
+                    """)
+                    continue
+                except SMTPNotSupportedError:
+                    error_log.error(f"""
+                        There was an SMTPNotSupported error!
+                        Reciever: {reciever_email}
+                        Error: {error}
+                    """)
+                    continue
+                sent_email_log.info(f"""
+                    Sent email to: {reciever_email}
+                    With attachment: {pdf_name} at {pdf_location}
+                    """)
     return True
 
 if __name__ == "__main__":
-    PARSER = argparse.ArgumentParser(description="This will send emails!")
+    PARSER = argparse.ArgumentParser(description="""
+        This utility will send emails to the address derived from the 
+        pdf fele name for all pdf files in a given directory. 
+
+        Example: some_email@domain.com.pdf -> sends to some_email@domain.com
+
+    """)
     PARSER.add_argument(
         "-d",
-        "--dir",
+        "--directory",
         required=True,
         help="""
             The directory which contains the PDFs (must be relative to this script)
@@ -143,20 +230,25 @@ if __name__ == "__main__":
     PARSER.add_argument(
         "-t",
         "--test",
+        action='store_true',
         required=False,
         help="""
             Dry run of the script which tells you if the script will work as expected.
         """
         )
     ARGS = PARSER.parse_args()
-    pdf_directory = ARGS.dir
-    is_test = ARGS.test 
+    pdf_directory = ARGS.directory
+    is_test = ARGS.test
+    # Use the given directory to get a list of email_address
     email_address_list = get_email_list(pdf_directory)
+    # Get a list of valid emails from the original list
     valid_email_list = validate_email_list(email_address_list)
     # Order the list and get rid of duplicates
     sorted_valid_emails = list(sorted(set(valid_email_list)))
+    # Get a list of tuples containing the email_address and the file location
     email_pdf_tuples = get_emails_and_pdfs(sorted_valid_emails, pdf_directory)
-    sent = send_emails(email_pdf_tuples)
-    if sent:
-        print("All done!")
+    # Iterate across the list and send the emails
+    send_emails = send_emails(email_pdf_tuples, is_test)
+    if send_emails:
+        print("All done! Please check logs for any errors, invalid_emails and sent_emails!")
 

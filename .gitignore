@@ -1,2 +1,6 @@
+logs/
 pdfs/
+*.swp
+*.swo
+__pycache__/
 
