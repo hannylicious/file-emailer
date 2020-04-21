@@ -17,6 +17,8 @@ from loggers import invalid_email_log
 from loggers import sent_email_log
 from pathlib import Path
 
+import pyodbc
+import requests
 
 def validate_email(email_address):
     """Valides an email address"""
@@ -36,6 +38,59 @@ def validate_email_list(email_list):
             continue
     return email_list
 
+def generate_documents(pdf_directory, employee_id, employee_email):
+    url = os.environ.get("PDF_EMAILER_DOC_ENDPOINT")
+    endpoint = url + str(employee_id)
+    directory = Path.cwd() / pdf_directory
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        pass
+    response = requests.get(endpoint)
+    if response.status_code == 200:
+        filename = str(directory) + "/" + employee_email + ".pdf"
+        with open(filename, 'wb') as f:
+                f.write(response.content)
+                f.close()
+
+def run_stored_procedure(stored_procedure, pdf_directory):
+    server = os.environ.get("PDF_EMAILER_HOST")
+    database = os.environ.get("PDF_EMAILER_DATABASE")
+    port = os.environ.get("PDF_EMAILER_PORT")
+    db_username = os.environ.get("PDF_EMAILER_USER")
+    db_password = os.environ.get("PDF_EMAILER_PASSWORD")
+    driver = os.environ.get("ODBC_DRIVER")
+    try:
+        connection = pyodbc.connect(
+            'DRIVER='
+            + driver
+            + ";SERVER="
+            + server
+            + ";PORT="
+            + port
+            + ";DATABASE="
+            + database
+            + ";UID="
+            + db_username
+            + ";PWD="
+            + db_password
+        )
+        cursor = connection.cursor()
+    except Exception as e:
+        print(f"There was an issue with connecting to MSSQL! ERROR: {e}")
+        sys.exit()
+    try:        
+        cursor.execute("{CALL " + stored_procedure + "}")
+    except Exception as e:
+        print(f"There was an issue executing the stored procedure! ERROR: {e}")
+        sys.exit()
+    rows = cursor.fetchall()
+    for row in rows:
+        employee_email = row[0]
+        employee_id = row[1]
+        generate_documents(pdf_directory, employee_id, employee_email)
+    connection.close()
+
 def get_email_list(pdf_directory):
     """returns a list of email address' """
     email_list = []
@@ -52,14 +107,12 @@ def get_email_list(pdf_directory):
 
 def get_emails_and_pdfs(email_list, pdf_directory):
     """ Returns a list of tuples containg: (email, pdf-path)"""
-    # Create a directory to store all valid_pdfs
     valid_pdf_data = []
     pdf_directory_path = Path.cwd() / pdf_directory
     valid_pdf_directory = Path.cwd() / pdf_directory / 'valid_pdfs'
     try:
         valid_pdf_directory.mkdir()
     except FileExistsError:
-        # Empty the directory
         for document in valid_pdf_directory.iterdir():
             try:
                 document.unlink()
@@ -68,6 +121,7 @@ def get_emails_and_pdfs(email_list, pdf_directory):
                 error_log.error(error)
                 sys.exit()
     for email in email_list:
+        # TODO: Cleanup username (check that its all good)
         username = email.split("@")[0]
         current_filename = email+".pdf"
         current_file_location = str(pdf_directory_path / current_filename)
@@ -96,7 +150,6 @@ def get_emails_and_pdfs(email_list, pdf_directory):
     return valid_pdf_data
 
 def send_emails(pdf_data, test_run=False):
-    # Connect to server
     context = ssl.create_default_context()
     sender_email = os.environ.get('SENDER_EMAIL')
     password = os.environ.get('SMTP_PASSWORD')
@@ -137,7 +190,6 @@ def send_emails(pdf_data, test_run=False):
             error_log.error(error_message)
             print(error_message)
             sys.exit()
-        # Setup Email
         for email, pdf_name, pdf_location in pdf_data:
             subject = "Test Subject"
             body = "Some Dummy Body Text"
@@ -228,6 +280,15 @@ if __name__ == "__main__":
         """
         )
     PARSER.add_argument(
+        "-sp",
+        "--stored_procedure",
+        required=False,
+        help="""
+            The name of the stored procedure to be run. Include this if you need to 
+            generate the PDFs.
+        """
+        )
+    PARSER.add_argument(
         "-t",
         "--test",
         action='store_true',
@@ -238,7 +299,12 @@ if __name__ == "__main__":
         )
     ARGS = PARSER.parse_args()
     pdf_directory = ARGS.directory
+    stored_procedure = ARGS.stored_procedure
     is_test = ARGS.test
+    if stored_procedure:
+        # This will run the stored_procedure and generate the
+        # pdfs on the given results
+        run_stored_procedure(stored_procedure, pdf_directory)
     # Use the given directory to get a list of email_address
     email_address_list = get_email_list(pdf_directory)
     # Get a list of valid emails from the original list
