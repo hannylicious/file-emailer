@@ -1,8 +1,10 @@
 logs/
 pdfs/
+docs/
 *.swp
 *.swo
 .env
+.vscode/
 __pycache__/
 Dockerfile
 docker-compose.yml
